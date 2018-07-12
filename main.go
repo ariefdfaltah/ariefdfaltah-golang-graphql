@@ -1,68 +1,162 @@
 package main
 
 import (
-	"ariefdfaltah-golang-graphql/musicutil"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"io"
+	"github.com/graphql-go/graphql"
+	gqlhandler "github.com/graphql-go/graphql-go-handler"
 	"io/ioutil"
 	"log"
 	"net/http"
-
-	"github.com/gorilla/handlers"
-	"github.com/gorilla/mux"
-	"github.com/graphql-go/graphql"
 )
 
-func GetDiscs(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
-	w.Header().Set("Access-Control-Allow-Origin", "*")
-	body, err := ioutil.ReadAll(io.LimitReader(r.Body, 1048576))
-	if err != nil {
-		log.Fatalln("Error GetDiscs", err)
-		w.WriteHeader(http.StatusInternalServerError)
-		return
-	}
-	if err := r.Body.Close(); err != nil {
-		log.Fatalln("Error GetDiscs", err)
-	}
-	var apolloQuery map[string]interface{}
-	fmt.Println("Received request GetDiscs")
-	if err := json.Unmarshal(body, &apolloQuery); err != nil { // unmarshall body contents as a type query
-		fmt.Println(err)
-		fmt.Println("Error on Unmarshalling!!!")
-		w.WriteHeader(422) // unprocessable entity
-		if err := json.NewEncoder(w).Encode(err); err != nil {
-			log.Fatalln("Error GetDiscs unmarshalling data", err)
-			w.WriteHeader(http.StatusInternalServerError)
-			return
-		}
-	}
-	query := apolloQuery["query"]
-	variables := apolloQuery["variables"]
-	result := graphql.Do(graphql.Params{
-		Schema:         musicutil.MusicSchema,
-		RequestString:  query.(string),
-		VariableValues: variables.(map[string]interface{}),
-	})
-	json.NewEncoder(w).Encode(result)
-	w.WriteHeader(http.StatusOK)
-	return
+// Post is a post
+type Post struct {
+	UserID int    `json:"userId"`
+	ID     int    `json:"id"`
+	Title  string `json:"title"`
+	Body   string `json:"body"`
+}
+
+// Comment is a comment
+type Comment struct {
+	PostID int    `json:"postId"`
+	ID     int    `json:"id"`
+	Name   string `json:"name"`
+	Email  string `json:"email"`
+	Body   string `json:"body"`
 }
 
 func main() {
-	router := mux.NewRouter().StrictSlash(true)
-	var handler http.Handler
-	handler = http.HandlerFunc(GetDiscs)
-	router.Methods("POST").Path("/").Name("GetDiscs").Handler(handler)
+	schema, err := graphql.NewSchema(graphql.SchemaConfig{
+		Query: graphql.NewObject(
+			createQueryType(
+				createPostType(
+					createCommentType(),
+				),
+			),
+		),
+	})
+	if err != nil {
+		log.Fatalf("failed to create new schema, error: %v", err)
+	}
+	handler := gqlhandler.New(&gqlhandler.Config{
+		Schema: &schema,
+	})
+	http.Handle("/graphql", handler)
+	log.Println("Server started at http://localhost:3000/graphql")
+	log.Fatal(http.ListenAndServe(":3000", nil))
+}
 
-	allowedOrigins := handlers.AllowedOrigins([]string{"*"})
-	headersOk := handlers.AllowedHeaders([]string{"X-Requested-With", "Accept", "Content-Type", "Content-Length", "Accept-Encoding", "Accept-Language", "X-CSRF-Token", "Authorization"})
-	allowedMethods := handlers.AllowedMethods([]string{"GET", "POST", "HEAD", "OPTIONS"})
+func createQueryType(postType *graphql.Object) graphql.ObjectConfig {
+	return graphql.ObjectConfig{Name: "QueryType", Fields: graphql.Fields{
+		"post": &graphql.Field{
+			Type: postType,
+			Args: graphql.FieldConfigArgument{
+				"id": &graphql.ArgumentConfig{
+					Type: graphql.NewNonNull(graphql.Int),
+				},
+			},
+			Resolve: func(p graphql.ResolveParams) (interface{}, error) {
+				id := p.Args["id"]
+				v, _ := id.(int)
+				log.Printf("fetching post with id: %d", v)
+				return fetchPostByiD(v)
+			},
+		},
+	}}
+}
 
-	fmt.Println("Now server is running on port 8090")
+func createPostType(commentType *graphql.Object) *graphql.Object {
+	return graphql.NewObject(graphql.ObjectConfig{
+		Name: "Post",
+		Fields: graphql.Fields{
+			"userId": &graphql.Field{
+				Type: graphql.NewNonNull(graphql.Int),
+			},
+			"id": &graphql.Field{
+				Type: graphql.NewNonNull(graphql.Int),
+			},
+			"title": &graphql.Field{
+				Type: graphql.String,
+			},
+			"body": &graphql.Field{
+				Type: graphql.String,
+			},
+			"comments": &graphql.Field{
+				Type: graphql.NewList(commentType),
+				Resolve: func(p graphql.ResolveParams) (interface{}, error) {
+					post, _ := p.Source.(*Post)
+					log.Printf("fetching comments of post with id: %d", post.ID)
+					return fetchCommentsByPostID(post.ID)
+				},
+			},
+		},
+	})
+}
 
-	// launch server
-	log.Fatal(http.ListenAndServe(":8090",
-		handlers.CORS(allowedOrigins, headersOk, allowedMethods)(router)))
+func createCommentType() *graphql.Object {
+	return graphql.NewObject(graphql.ObjectConfig{
+		Name: "Comment",
+		Fields: graphql.Fields{
+			"postid": &graphql.Field{
+				Type: graphql.NewNonNull(graphql.Int),
+			},
+			"id": &graphql.Field{
+				Type: graphql.NewNonNull(graphql.Int),
+			},
+			"name": &graphql.Field{
+				Type: graphql.String,
+			},
+			"email": &graphql.Field{
+				Type: graphql.String,
+			},
+			"body": &graphql.Field{
+				Type: graphql.String,
+			},
+		},
+	})
+}
+
+func fetchPostByiD(id int) (*Post, error) {
+	resp, err := http.Get(fmt.Sprintf("http://jsonplaceholder.typicode.com/posts/%d", id))
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return nil, fmt.Errorf("%s: %s", "could not fetch data", resp.Status)
+	}
+	b, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		return nil, errors.New("could not read data")
+	}
+	result := Post{}
+	err = json.Unmarshal(b, &result)
+	if err != nil {
+		return nil, errors.New("could not unmarshal data")
+	}
+	return &result, nil
+}
+
+func fetchCommentsByPostID(id int) ([]Comment, error) {
+	resp, err := http.Get(fmt.Sprintf("http://jsonplaceholder.typicode.com/posts/%d/comments", id))
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return nil, fmt.Errorf("%s: %s", "could not fetch data", resp.Status)
+	}
+	b, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		return nil, errors.New("could not read data")
+	}
+	result := []Comment{}
+	err = json.Unmarshal(b, &result)
+	if err != nil {
+		return nil, errors.New("could not unmarshal data")
+	}
+	return result, nil
 }
